@@ -1,11 +1,11 @@
-import json
 import os
 import smtplib
 import threading
+from contextlib import contextmanager
 from datetime import datetime, time
-from typing import Dict, List, Optional
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from typing import Dict, List, Optional
 
 import pytz
 import yfinance as yf
@@ -14,26 +14,23 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 load_dotenv()
 
 app = FastAPI(title="Stock Dashboard API")
 
-# CORS - Allow all origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Database configuration
 DATABASE_URL = os.getenv("DATABASE_URL")
-
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set")
 
@@ -44,91 +41,27 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-
-# SQLAlchemy Models
-class PortfolioModel(Base):
-    __tablename__ = "portfolio"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    symbol = Column(String(20), unique=True, nullable=False, index=True)
-    buy_price = Column(Float, nullable=False)
-    target_price = Column(Float, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-
-class PriceHistoryModel(Base):
-    __tablename__ = "price_history"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    symbol = Column(String(20), nullable=False, index=True)
-    price_date = Column(DateTime, nullable=False)
-    open_price = Column(Float)
-    high_price = Column(Float)
-    low_price = Column(Float)
-    close_price = Column(Float)
-    volume = Column(Integer)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-
-class ScreenerResultModel(Base):
-    __tablename__ = "screener_results"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    index_name = Column(String(20), nullable=False)
-    symbol = Column(String(20), nullable=False, index=True)
-    current_price = Column(Float)
-    sector = Column(String(100))
-    decline_3m = Column(Float)
-    decline_6m = Column(Float)
-    decline_1y = Column(Float)
-    alert_type = Column(String(50))
-    thresholds_3m = Column(Float)
-    thresholds_6m = Column(Float)
-    thresholds_1y = Column(Float)
-    scanned_at = Column(DateTime, default=datetime.utcnow, index=True)
-
-
-class EmailLogModel(Base):
-    __tablename__ = "email_logs"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    subject = Column(String(255))
-    recipient = Column(String(255))
-    alerts_count = Column(Integer)
-    declined_count = Column(Integer)
-    sent_at = Column(DateTime, default=datetime.utcnow)
-    status = Column(String(20), default="sent")
-
-
-def init_db():
-    """Initialize database tables."""
-    Base.metadata.create_all(bind=engine)
-    print("Database tables created successfully")
-
-
-# Initialize database on startup
-init_db()
-
 # Email configuration
 SMTP_HOST = "smtp-relay.brevo.com"
 SMTP_PORT = 587
 SMTP_USER = "7f75f2003@smtp-brevo.com"
-SMTP_PASS = os.getenv("SMTP_PASS", "xsmtpsib-3492d6ce8135986bb1763490ca3dade1d613f143e92667571be5ffe39beefc05-TXHt0UO2QnS1ILBK")
+SMTP_PASS = os.getenv(
+    "SMTP_PASS",
+    "xsmtpsib-3492d6ce8135986bb1763490ca3dade1d613f143e92667571be5ffe39beefc05-TXHt0UO2QnS1ILBK",
+)
 FROM_EMAIL = "abcxyz123inf@gmail.com"
 TO_EMAIL = "gattucharanteja8143@gmail.com"
 
 # Indian market hours (IST)
 IST = pytz.timezone("Asia/Kolkata")
-MARKET_OPEN = time(9, 20)  # 9:20 AM IST
-MARKET_CLOSE = time(15, 20)  # 3:20 PM IST
+MARKET_OPEN = time(9, 20)
+MARKET_CLOSE = time(15, 20)
 
-# Nifty screener configuration (configurable thresholds)
-NIFTY_3M_DECLINE_THRESHOLD = 25.0  # Down 25% in last 3 months
-NIFTY_6M_DECLINE_THRESHOLD = 40.0  # Down 40% in last 6 months
-NIFTY_1Y_DECLINE_THRESHOLD = 48.0  # Down 48% in last 1 year
+# Nifty screener configuration
+NIFTY_3M_DECLINE_THRESHOLD = 25.0
+NIFTY_6M_DECLINE_THRESHOLD = 40.0
+NIFTY_1Y_DECLINE_THRESHOLD = 48.0
 
-# Nifty 50 and Nifty 100 constituents (common stocks)
 NIFTY_50 = [
     "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "HINDUNILVR", "SBIN", "BHARTIARTL",
     "ITC", "KOTAKBANK", "LT", "AXISBANK", "ASIANPAINT", "MARUTI", "BAJFINANCE", "TITAN",
@@ -149,37 +82,103 @@ NIFTY_100 = NIFTY_50 + [
     "TATATECH", "TORNTPOWER", "UCOBANK", "UNIONBANK", "UPL", "ZYDUSLIFE"
 ]
 
-
-def is_market_open() -> bool:
-    """Check if Indian stock market is currently open (Mon-Fri, 9:20 AM - 3:20 PM IST)"""
-    now_ist = datetime.now(IST)
-    current_time = now_ist.time()
-    weekday = now_ist.weekday()  # 0=Monday, 4=Friday
-
-    # Check if weekend
-    if weekday >= 5:  # Saturday or Sunday
-        return False
-
-    # Check market hours
-    return MARKET_OPEN <= current_time <= MARKET_CLOSE
-
-
-def get_db():
-    """Get database session."""
-    db = SessionLocal()
-    try:
-        return db
-    finally:
-        pass
-
-
-# Scheduler
 scheduler = BackgroundScheduler()
-scheduler.start()
-
-# Global storage for nifty screener results
 nifty_screener_results: Dict[str, dict] = {}
 nifty_screener_running: Dict[str, bool] = {}
+
+
+@contextmanager
+def get_db_session():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def normalize_symbol(symbol: str) -> str:
+    return symbol.strip().upper()
+
+
+def to_yahoo_symbol(symbol: str) -> str:
+    cleaned = normalize_symbol(symbol)
+    if cleaned.endswith((".NS", ".BO")):
+        return cleaned
+    return f"{cleaned}.NS"
+
+
+def init_db():
+    Base.metadata.create_all(bind=engine)
+    print("Database tables created successfully")
+
+
+@app.on_event("startup")
+def startup_event():
+    init_db()
+    if not scheduler.running:
+        scheduler.start()
+
+
+@app.on_event("shutdown")
+def shutdown_event():
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+
+
+# SQLAlchemy Models
+class PortfolioModel(Base):
+    __tablename__ = "portfolio"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), unique=True, nullable=False, index=True)
+    buy_price = Column(Float, nullable=False)
+    target_price = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PriceHistoryModel(Base):
+    __tablename__ = "price_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    price_date = Column(DateTime, nullable=False)
+    open_price = Column(Float)
+    high_price = Column(Float)
+    low_price = Column(Float)
+    close_price = Column(Float)
+    volume = Column(Integer)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ScreenerResultModel(Base):
+    __tablename__ = "screener_results"
+
+    id = Column(Integer, primary_key=True, index=True)
+    index_name = Column(String(20), nullable=False)
+    symbol = Column(String(20), nullable=False, index=True)
+    current_price = Column(Float)
+    sector = Column(String(100))
+    decline_3m = Column(Float)
+    decline_6m = Column(Float)
+    decline_1y = Column(Float)
+    alert_type = Column(String(50))
+    thresholds_3m = Column(Float)
+    thresholds_6m = Column(Float)
+    thresholds_1y = Column(Float)
+    scanned_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class EmailLogModel(Base):
+    __tablename__ = "email_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    subject = Column(String(255))
+    recipient = Column(String(255))
+    alerts_count = Column(Integer)
+    declined_count = Column(Integer)
+    sent_at = Column(DateTime, default=datetime.utcnow)
+    status = Column(String(20), default="sent")
 
 
 class StockInput(BaseModel):
@@ -200,15 +199,17 @@ class CustomAlertInput(BaseModel):
 class StockReturn(BaseModel):
     symbol: str
     buy_price: float
-    current_price: float
-    week_52_high: float
+    current_price: Optional[float]
+    week_52_high: Optional[float]
     week_52_low: Optional[float]
     week_100_high: Optional[float]
-    potential_return_52w: float
+    potential_return_52w: Optional[float]
     potential_return_100w: Optional[float]
     dividend_yield: Optional[float]
     dividend_history: Optional[List[dict]]
     sector: Optional[str]
+    target_price: Optional[float] = None
+    error: Optional[str] = None
 
 
 class PriceAlert(BaseModel):
@@ -259,21 +260,29 @@ class NiftyScreenerResult(BaseModel):
     thresholds: dict
 
 
+def is_market_open() -> bool:
+    now_ist = datetime.now(IST)
+    current_time = now_ist.time()
+    weekday = now_ist.weekday()
+    if weekday >= 5:
+        return False
+    return MARKET_OPEN <= current_time <= MARKET_CLOSE
+
+
 def calculate_potential_return(buy_price: float, high_price: float) -> float:
-    """Calculate potential return percentage when stock reaches the high price."""
     if buy_price <= 0:
         return 0.0
     return round(((high_price - buy_price) / buy_price) * 100, 2)
 
 
 def fetch_stock_data(symbol: str) -> dict:
-    """Fetch stock data from yfinance."""
-    ticker_symbol = symbol.upper()
-    if not ticker_symbol.endswith((".NS", ".BO")):
-        ticker_symbol = ticker_symbol + ".NS"
-
+    ticker_symbol = to_yahoo_symbol(symbol)
     ticker = yf.Ticker(ticker_symbol)
-    info = ticker.info
+
+    try:
+        info = ticker.info or {}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch stock info for {symbol}: {str(e)}")
 
     week_52_high = info.get("fiftyTwoWeekHigh")
     week_52_low = info.get("fiftyTwoWeekLow")
@@ -283,9 +292,9 @@ def fetch_stock_data(symbol: str) -> dict:
 
     week_100_high = None
     try:
-        hist = ticker.history(period="2y")
-        if len(hist) > 0:
-            week_100_high = round(hist["High"].max(), 2)
+        hist = ticker.history(period="2y", auto_adjust=False)
+        if not hist.empty and "High" in hist:
+            week_100_high = round(float(hist["High"].max()), 2)
     except Exception:
         pass
 
@@ -293,50 +302,50 @@ def fetch_stock_data(symbol: str) -> dict:
     try:
         dividends = ticker.dividends
         if dividends is not None and len(dividends) > 0:
-            recent_dividends = dividends.tail(5)
-            for date, amount in recent_dividends.items():
+            for date, amount in dividends.tail(5).items():
                 dividend_history.append({
                     "date": date.strftime("%Y-%m-%d"),
-                    "amount": round(amount, 2)
+                    "amount": round(float(amount), 2),
                 })
     except Exception:
         pass
 
-    if not week_52_high or not current_price:
+    if week_52_high is None or current_price is None:
         raise HTTPException(
             status_code=404,
-            detail=f"Could not fetch data for symbol: {symbol}. Try adding .NS or .BO suffix (e.g., ITC.NS)"
+            detail=f"Could not fetch usable data for symbol: {symbol}"
         )
 
     return {
-        "symbol": symbol.upper(),
-        "current_price": round(current_price, 2),
-        "week_52_high": round(week_52_high, 2),
-        "week_52_low": round(week_52_low, 2) if week_52_low else None,
+        "symbol": normalize_symbol(symbol),
+        "current_price": round(float(current_price), 2),
+        "week_52_high": round(float(week_52_high), 2),
+        "week_52_low": round(float(week_52_low), 2) if week_52_low is not None else None,
         "week_100_high": week_100_high,
         "sector": sector,
-        "dividend_yield": round(dividend_yield * 100, 2) if dividend_yield else None,
+        "dividend_yield": round(float(dividend_yield) * 100, 2) if dividend_yield is not None else None,
         "dividend_history": dividend_history,
     }
 
 
-def send_email_notification(alerts: List[PriceAlert], declined_stocks: List[DeclinedStock] = None):
-    """Send email notification and log to database."""
+def send_email_notification(
+    alerts: List[PriceAlert],
+    declined_stocks: Optional[List[DeclinedStock]] = None
+):
     if not alerts and not declined_stocks:
         return
 
-    db = SessionLocal()
-    try:
+    with get_db_session() as db:
         msg = MIMEMultipart()
-        msg['From'] = FROM_EMAIL
-        msg['To'] = TO_EMAIL
+        msg["From"] = FROM_EMAIL
+        msg["To"] = TO_EMAIL
 
         if declined_stocks and alerts:
-            msg['Subject'] = f"🚨 Stock Alert - {len(alerts)} Portfolio + {len(declined_stocks)} Nifty Stocks Down!"
+            msg["Subject"] = f"🚨 Stock Alert - {len(alerts)} Portfolio + {len(declined_stocks)} Nifty Stocks Down!"
         elif declined_stocks:
-            msg['Subject'] = f"📉 Nifty Screener - {len(declined_stocks)} Stocks Down Significantly!"
+            msg["Subject"] = f"📉 Nifty Screener - {len(declined_stocks)} Stocks Down Significantly!"
         else:
-            msg['Subject'] = f"Stock Alert - {len(alerts)} Alert(s)!"
+            msg["Subject"] = f"Stock Alert - {len(alerts)} Alert(s)!"
 
         body = """
         <html>
@@ -412,58 +421,49 @@ def send_email_notification(alerts: List[PriceAlert], declined_stocks: List[Decl
         </html>
         """
 
-        msg.attach(MIMEText(body, 'html'))
+        msg.attach(MIMEText(body, "html"))
 
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT)
-        server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
-        server.send_message(msg)
-        server.quit()
-
-        # Log to database
-        email_log = EmailLogModel(
-            subject=msg['Subject'],
-            recipient=TO_EMAIL,
-            alerts_count=len(alerts),
-            declined_count=len(declined_stocks) if declined_stocks else 0,
-            status="sent"
-        )
-        db.add(email_log)
-        db.commit()
-
-        print(f"Email sent! Alerts: {len(alerts)}, Declined: {len(declined_stocks) if declined_stocks else 0}")
-    except Exception as e:
-        print(f"Failed to send email: {e}")
-        db.rollback()
-        # Log failure
         try:
+            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+            server.quit()
+
             email_log = EmailLogModel(
-                subject=msg['Subject'] if 'msg' in dir() else "Unknown",
+                subject=msg["Subject"],
                 recipient=TO_EMAIL,
                 alerts_count=len(alerts),
                 declined_count=len(declined_stocks) if declined_stocks else 0,
-                status="failed"
+                status="sent",
             )
             db.add(email_log)
             db.commit()
-        except:
-            pass
-    finally:
-        db.close()
+        except Exception as e:
+            print(f"Failed to send email: {e}")
+            db.rollback()
+            try:
+                email_log = EmailLogModel(
+                    subject=msg["Subject"],
+                    recipient=TO_EMAIL,
+                    alerts_count=len(alerts),
+                    declined_count=len(declined_stocks) if declined_stocks else 0,
+                    status="failed",
+                )
+                db.add(email_log)
+                db.commit()
+            except Exception:
+                db.rollback()
 
 
 def check_portfolio_prices():
-    """Check all stocks in portfolio and send alerts."""
     if not is_market_open():
         print(f"Market closed - Skipping check at {datetime.now(IST)}")
         return
 
-    db = SessionLocal()
-    try:
+    with get_db_session() as db:
         portfolio_items = db.query(PortfolioModel).all()
-        
         if not portfolio_items:
-            db.close()
             return
 
         alerts: List[PriceAlert] = []
@@ -477,7 +477,6 @@ def check_portfolio_prices():
                 week_100_high = data["week_100_high"]
 
                 if week_52_high and abs(current_price - week_52_high) / week_52_high < 0.01:
-                    potential_return = calculate_potential_return(item.buy_price, week_52_high)
                     alerts.append(PriceAlert(
                         symbol=item.symbol,
                         buy_price=item.buy_price,
@@ -486,11 +485,10 @@ def check_portfolio_prices():
                         high_price=week_52_high,
                         low_price=None,
                         target_price=None,
-                        potential_return=potential_return
+                        potential_return=calculate_potential_return(item.buy_price, week_52_high),
                     ))
 
                 if week_100_high and abs(current_price - week_100_high) / week_100_high < 0.01:
-                    potential_return = calculate_potential_return(item.buy_price, week_100_high)
                     alerts.append(PriceAlert(
                         symbol=item.symbol,
                         buy_price=item.buy_price,
@@ -499,7 +497,7 @@ def check_portfolio_prices():
                         high_price=week_100_high,
                         low_price=None,
                         target_price=None,
-                        potential_return=potential_return
+                        potential_return=calculate_potential_return(item.buy_price, week_100_high),
                     ))
 
                 if week_52_low and abs(current_price - week_52_low) / week_52_low < 0.01:
@@ -511,11 +509,10 @@ def check_portfolio_prices():
                         high_price=None,
                         low_price=week_52_low,
                         target_price=None,
-                        potential_return=None
+                        potential_return=None,
                     ))
 
                 if item.target_price and current_price >= item.target_price:
-                    potential_return = calculate_potential_return(item.buy_price, current_price)
                     alerts.append(PriceAlert(
                         symbol=item.symbol,
                         buy_price=item.buy_price,
@@ -524,91 +521,94 @@ def check_portfolio_prices():
                         high_price=None,
                         low_price=None,
                         target_price=item.target_price,
-                        potential_return=potential_return
+                        potential_return=calculate_potential_return(item.buy_price, current_price),
                     ))
-            except HTTPException:
-                print(f"Could not fetch data for {item.symbol}")
+            except HTTPException as e:
+                print(f"Could not fetch data for {item.symbol}: {e.detail}")
+            except Exception as e:
+                print(f"Unexpected error for {item.symbol}: {e}")
 
         if alerts:
             send_email_notification(alerts)
         else:
             print(f"Price check completed at {datetime.now(IST)} - No alerts")
-    finally:
-        db.close()
 
 
-def screen_nifty_stocks(index: str = "NIFTY100", months_3_decline: float = 25.0,
-                        months_6_decline: float = 40.0, year_1_decline: float = 48.0) -> NiftyScreenerResult:
-    """Screen Nifty stocks for significant declines."""
+def screen_nifty_stocks(
+    index: str = "NIFTY100",
+    months_3_decline: float = 25.0,
+    months_6_decline: float = 40.0,
+    year_1_decline: float = 48.0,
+) -> NiftyScreenerResult:
     constituents = NIFTY_50 if index == "NIFTY50" else NIFTY_100
-
     declined_stocks: List[DeclinedStock] = []
     scanned = 0
-    failed = 0
 
-    for symbol in constituents:
-        try:
-            ticker_symbol = symbol + ".NS"
-            ticker = yf.Ticker(ticker_symbol)
-            info = ticker.info
-            current_price = info.get("currentPrice") or info.get("previousClose")
-            sector = info.get("sector")
+    with get_db_session() as db:
+        for symbol in constituents:
+            try:
+                ticker = yf.Ticker(to_yahoo_symbol(symbol))
 
-            if not current_price:
-                failed += 1
-                continue
-
-            hist_3m = ticker.history(period="3mo")
-            hist_6m = ticker.history(period="6mo")
-            hist_1y = ticker.history(period="1y")
-
-            decline_3m = None
-            decline_6m = None
-            decline_1y = None
-
-            if len(hist_3m) > 0:
-                price_3m_ago = hist_3m["Close"].iloc[0]
-                if price_3m_ago > 0:
-                    decline_3m = round(((price_3m_ago - current_price) / price_3m_ago) * 100, 2)
-
-            if len(hist_6m) > 0:
-                price_6m_ago = hist_6m["Close"].iloc[0]
-                if price_6m_ago > 0:
-                    decline_6m = round(((price_6m_ago - current_price) / price_6m_ago) * 100, 2)
-
-            if len(hist_1y) > 0:
-                price_1y_ago = hist_1y["Close"].iloc[0]
-                if price_1y_ago > 0:
-                    decline_1y = round(((price_1y_ago - current_price) / price_1y_ago) * 100, 2)
-
-            scanned += 1
-
-            alert_type = None
-            if decline_3m and decline_3m >= months_3_decline:
-                alert_type = "3_month_decline"
-            elif decline_6m and decline_6m >= months_6_decline:
-                alert_type = "6_month_decline"
-            elif decline_1y and decline_1y >= year_1_decline:
-                alert_type = "1_year_decline"
-
-            if alert_type:
-                declined_stocks.append(DeclinedStock(
-                    symbol=symbol,
-                    current_price=round(current_price, 2),
-                    sector=sector,
-                    decline_3m=decline_3m,
-                    decline_6m=decline_6m,
-                    decline_1y=decline_1y,
-                    alert_type=alert_type
-                ))
-
-                # Save to database
-                db = SessionLocal()
                 try:
-                    screener_result = ScreenerResultModel(
+                    info = ticker.info or {}
+                except Exception:
+                    info = {}
+
+                current_price = info.get("currentPrice") or info.get("previousClose")
+                sector = info.get("sector")
+
+                if current_price is None:
+                    continue
+
+                hist_3m = ticker.history(period="3mo", auto_adjust=False)
+                hist_6m = ticker.history(period="6mo", auto_adjust=False)
+                hist_1y = ticker.history(period="1y", auto_adjust=False)
+
+                decline_3m = None
+                decline_6m = None
+                decline_1y = None
+
+                if not hist_3m.empty:
+                    price_3m_ago = hist_3m["Close"].iloc[0]
+                    if price_3m_ago > 0:
+                        decline_3m = round(((price_3m_ago - current_price) / price_3m_ago) * 100, 2)
+
+                if not hist_6m.empty:
+                    price_6m_ago = hist_6m["Close"].iloc[0]
+                    if price_6m_ago > 0:
+                        decline_6m = round(((price_6m_ago - current_price) / price_6m_ago) * 100, 2)
+
+                if not hist_1y.empty:
+                    price_1y_ago = hist_1y["Close"].iloc[0]
+                    if price_1y_ago > 0:
+                        decline_1y = round(((price_1y_ago - current_price) / price_1y_ago) * 100, 2)
+
+                scanned += 1
+
+                alert_type = None
+                if decline_3m is not None and decline_3m >= months_3_decline:
+                    alert_type = "3_month_decline"
+                elif decline_6m is not None and decline_6m >= months_6_decline:
+                    alert_type = "6_month_decline"
+                elif decline_1y is not None and decline_1y >= year_1_decline:
+                    alert_type = "1_year_decline"
+
+                if alert_type:
+                    declined_stock = DeclinedStock(
+                        symbol=symbol,
+                        current_price=round(float(current_price), 2),
+                        sector=sector,
+                        decline_3m=decline_3m,
+                        decline_6m=decline_6m,
+                        decline_1y=decline_1y,
+                        alert_type=alert_type,
+                    )
+                    declined_stocks.append(declined_stock)
+
+                    db.add(ScreenerResultModel(
                         index_name=index,
                         symbol=symbol,
-                        current_price=round(current_price, 2),
+                        current_price=round(float(current_price), 2),
                         sector=sector,
                         decline_3m=decline_3m,
                         decline_6m=decline_6m,
@@ -616,21 +616,12 @@ def screen_nifty_stocks(index: str = "NIFTY100", months_3_decline: float = 25.0,
                         alert_type=alert_type,
                         thresholds_3m=months_3_decline,
                         thresholds_6m=months_6_decline,
-                        thresholds_1y=year_1_decline
-                    )
-                    db.add(screener_result)
+                        thresholds_1y=year_1_decline,
+                    ))
                     db.commit()
-                except:
-                    db.rollback()
-                finally:
-                    db.close()
 
-        except Exception as e:
-            print(f"Error processing {symbol}: {e}")
-            failed += 1
-            continue
-
-    print(f"Screening complete: {scanned} scanned, {failed} failed, {len(declined_stocks)} declined")
+            except Exception as e:
+                print(f"Error processing {symbol}: {e}")
 
     return NiftyScreenerResult(
         index=index,
@@ -640,13 +631,12 @@ def screen_nifty_stocks(index: str = "NIFTY100", months_3_decline: float = 25.0,
         thresholds={
             "3_month": months_3_decline,
             "6_month": months_6_decline,
-            "1_year": year_1_decline
-        }
+            "1_year": year_1_decline,
+        },
     )
 
 
 def check_nifty_opportunities(index: str = "NIFTY100"):
-    """Check Nifty stocks for buying opportunities and send email alerts."""
     if not is_market_open():
         print(f"Market closed - Skipping Nifty screener at {datetime.now(IST)}")
         return
@@ -656,101 +646,68 @@ def check_nifty_opportunities(index: str = "NIFTY100"):
             index=index,
             months_3_decline=NIFTY_3M_DECLINE_THRESHOLD,
             months_6_decline=NIFTY_6M_DECLINE_THRESHOLD,
-            year_1_decline=NIFTY_1Y_DECLINE_THRESHOLD
+            year_1_decline=NIFTY_1Y_DECLINE_THRESHOLD,
         )
-
         if result.declined_stocks:
-            print(f"Found {len(result.declined_stocks)} declined stocks in {index}")
             send_email_notification([], result.declined_stocks)
-        else:
-            print(f"No declined stocks found in {index}")
-
     except Exception as e:
         print(f"Error in Nifty screener: {e}")
 
 
 @app.post("/stocks", response_model=StockAddResponse)
 def add_stock(stock: StockInput):
-    """Add a stock to the portfolio."""
-    symbol_upper = stock.symbol.upper()
+    symbol_upper = normalize_symbol(stock.symbol)
 
-    db = SessionLocal()
-    try:
-        # Check if already in portfolio
+    with get_db_session() as db:
         existing = db.query(PortfolioModel).filter(PortfolioModel.symbol == symbol_upper).first()
         if existing:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Stock {symbol_upper} already in portfolio. Use GET /portfolio to view."
-            )
+            raise HTTPException(status_code=400, detail=f"Stock {symbol_upper} already in portfolio")
 
-        # Validate stock exists on NSE
         try:
             fetch_stock_data(symbol_upper)
-        except HTTPException as e:
+        except HTTPException:
             raise HTTPException(
                 status_code=400,
-                detail=f"Stock '{symbol_upper}' does not exist on NSE. Please check the symbol."
+                detail=f"Stock '{symbol_upper}' does not exist on NSE or data is unavailable",
             )
 
-        # Add to database
-        new_stock = PortfolioModel(
-            symbol=symbol_upper,
-            buy_price=stock.buy_price
-        )
+        new_stock = PortfolioModel(symbol=symbol_upper, buy_price=stock.buy_price)
         db.add(new_stock)
         db.commit()
-        db.refresh(new_stock)
 
         return StockAddResponse(
             message="Stock added successfully",
             symbol=symbol_upper,
-            buy_price=stock.buy_price
+            buy_price=stock.buy_price,
         )
-    finally:
-        db.close()
 
 
 @app.delete("/stocks/{symbol}", response_model=DeleteResponse)
 def delete_stock(symbol: str):
-    """Remove a stock from the portfolio."""
-    symbol_upper = symbol.upper()
+    symbol_upper = normalize_symbol(symbol)
 
-    db = SessionLocal()
-    try:
+    with get_db_session() as db:
         stock = db.query(PortfolioModel).filter(PortfolioModel.symbol == symbol_upper).first()
-        
         if not stock:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Stock {symbol_upper} not found in portfolio"
-            )
+            raise HTTPException(status_code=404, detail=f"Stock {symbol_upper} not found in portfolio")
 
         db.delete(stock)
         db.commit()
 
         return DeleteResponse(
             message=f"Stock {symbol_upper} removed successfully",
-            symbol=symbol_upper
+            symbol=symbol_upper,
         )
-    finally:
-        db.close()
 
 
 @app.post("/stocks/{symbol}/alert")
 def set_custom_alert(symbol: str, alert_input: CustomAlertInput):
-    """Set a custom price target alert for a stock."""
-    symbol_upper = symbol.upper()
+    symbol_upper = normalize_symbol(symbol)
 
-    db = SessionLocal()
-    try:
+    with get_db_session() as db:
         stock = db.query(PortfolioModel).filter(PortfolioModel.symbol == symbol_upper).first()
-        
         if not stock:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Stock {symbol_upper} not found in portfolio"
-            )
+            raise HTTPException(status_code=404, detail=f"Stock {symbol_upper} not found in portfolio")
 
         stock.target_price = alert_input.target_price
         stock.updated_at = datetime.utcnow()
@@ -759,278 +716,275 @@ def set_custom_alert(symbol: str, alert_input: CustomAlertInput):
         return {
             "message": f"Custom alert set for {symbol_upper}",
             "symbol": symbol_upper,
-            "target_price": alert_input.target_price
+            "target_price": alert_input.target_price,
         }
-    finally:
-        db.close()
 
 
 @app.get("/portfolio")
 def get_portfolio():
-    """Get all stocks in portfolio with their potential returns."""
-    db = SessionLocal()
-    try:
+    with get_db_session() as db:
         portfolio_items = db.query(PortfolioModel).all()
-        
         results = []
+
         for item in portfolio_items:
+            result = {
+                "symbol": item.symbol,
+                "buy_price": item.buy_price,
+                "target_price": item.target_price,
+                "current_price": None,
+                "week_52_high": None,
+                "week_52_low": None,
+                "week_100_high": None,
+                "potential_return_52w": None,
+                "potential_return_100w": None,
+                "dividend_yield": None,
+                "dividend_history": [],
+                "sector": None,
+                "error": None,
+            }
+
             try:
                 data = fetch_stock_data(item.symbol)
-                potential_52w = calculate_potential_return(item.buy_price, data["week_52_high"])
-                potential_100w = None
-                if data["week_100_high"]:
-                    potential_100w = calculate_potential_return(item.buy_price, data["week_100_high"])
+                result["current_price"] = data.get("current_price")
+                result["week_52_high"] = data.get("week_52_high")
+                result["week_52_low"] = data.get("week_52_low")
+                result["week_100_high"] = data.get("week_100_high")
+                result["dividend_yield"] = data.get("dividend_yield")
+                result["dividend_history"] = data.get("dividend_history", [])
+                result["sector"] = data.get("sector")
 
-                results.append(StockReturn(
-                    symbol=item.symbol,
-                    buy_price=item.buy_price,
-                    current_price=data["current_price"],
-                    week_52_high=data["week_52_high"],
-                    week_52_low=data["week_52_low"],
-                    week_100_high=data["week_100_high"],
-                    potential_return_52w=potential_52w,
-                    potential_return_100w=potential_100w,
-                    dividend_yield=data["dividend_yield"],
-                    dividend_history=data["dividend_history"],
-                    sector=data["sector"],
-                ))
-            except HTTPException:
-                results.append({
-                    "symbol": item.symbol,
-                    "buy_price": item.buy_price,
-                    "target_price": item.target_price,
-                    "error": "Could not fetch data"
-                })
+                if data.get("week_52_high") is not None:
+                    result["potential_return_52w"] = calculate_potential_return(item.buy_price, data["week_52_high"])
+
+                if data.get("week_100_high") is not None:
+                    result["potential_return_100w"] = calculate_potential_return(item.buy_price, data["week_100_high"])
+
+            except HTTPException as e:
+                result["error"] = e.detail
+            except Exception as e:
+                result["error"] = f"Failed to fetch market data: {str(e)}"
+
+            results.append(result)
+
         return results
-    finally:
-        db.close()
 
 
 @app.get("/portfolio/sector")
 def get_portfolio_by_sector():
-    """Get stocks grouped by sector with sector-wise returns."""
-    db = SessionLocal()
-    try:
+    with get_db_session() as db:
         portfolio_items = db.query(PortfolioModel).all()
-        
         sector_groups: Dict[str, List[dict]] = {}
 
         for item in portfolio_items:
             try:
                 data = fetch_stock_data(item.symbol)
-                sector = data["sector"] or "Unknown"
-
-                potential_52w = calculate_potential_return(item.buy_price, data["week_52_high"])
-
+                sector = data.get("sector") or "Unknown"
                 stock_info = {
                     "symbol": item.symbol,
                     "buy_price": item.buy_price,
-                    "current_price": data["current_price"],
-                    "potential_return_52w": potential_52w,
-                    "sector": sector
+                    "current_price": data.get("current_price"),
+                    "potential_return_52w": calculate_potential_return(item.buy_price, data["week_52_high"])
+                    if data.get("week_52_high") is not None else None,
+                    "sector": sector,
+                    "error": None,
                 }
-
-                if sector not in sector_groups:
-                    sector_groups[sector] = []
-                sector_groups[sector].append(stock_info)
-
-            except HTTPException:
-                if "Unknown" not in sector_groups:
-                    sector_groups["Unknown"] = []
-                sector_groups["Unknown"].append({
+            except HTTPException as e:
+                sector = "Unknown"
+                stock_info = {
                     "symbol": item.symbol,
                     "buy_price": item.buy_price,
-                    "error": "Could not fetch data",
-                    "sector": "Unknown"
-                })
+                    "current_price": None,
+                    "potential_return_52w": None,
+                    "sector": sector,
+                    "error": e.detail,
+                }
+            except Exception as e:
+                sector = "Unknown"
+                stock_info = {
+                    "symbol": item.symbol,
+                    "buy_price": item.buy_price,
+                    "current_price": None,
+                    "potential_return_52w": None,
+                    "sector": sector,
+                    "error": str(e),
+                }
+
+            sector_groups.setdefault(sector, []).append(stock_info)
 
         result = []
         for sector, stocks in sector_groups.items():
-            valid_returns = [s["potential_return_52w"] for s in stocks if "potential_return_52w" in s]
+            valid_returns = [s["potential_return_52w"] for s in stocks if s.get("potential_return_52w") is not None]
             avg_return = round(sum(valid_returns) / len(valid_returns), 2) if valid_returns else None
-
             result.append({
                 "sector": sector,
                 "stocks": stocks,
                 "total_stocks": len(stocks),
-                "avg_return": avg_return
+                "avg_return": avg_return,
             })
 
         return result
-    finally:
-        db.close()
 
 
 @app.post("/scheduler/start")
 def start_scheduler():
-    """Start the price checker scheduler (runs every 60 minutes)"""
-    global scheduler
     scheduler.remove_all_jobs()
     scheduler.add_job(
         check_portfolio_prices,
-        'interval',
+        "interval",
         minutes=60,
-        id='price_checker',
-        replace_existing=True
+        id="price_checker",
+        replace_existing=True,
     )
-    return {
-        "message": "Scheduler started - Price checker runs every 60 minutes",
-        "status": "running"
-    }
+    return {"message": "Scheduler started - Price checker runs every 60 minutes", "status": "running"}
 
 
 @app.post("/scheduler/stop")
 def stop_scheduler():
-    """Stop the price checker scheduler"""
-    global scheduler
-    scheduler.remove_job('price_checker')
-    return {
-        "message": "Scheduler stopped",
-        "status": "stopped"
-    }
+    try:
+        scheduler.remove_job("price_checker")
+    except Exception:
+        pass
+    return {"message": "Scheduler stopped", "status": "stopped"}
 
 
 @app.get("/scheduler/status")
 def scheduler_status():
-    """Check scheduler status"""
     jobs = scheduler.get_jobs()
     return {
         "status": "running" if jobs else "stopped",
         "market_open": is_market_open(),
         "ist_time": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
-        "jobs": [str(job) for job in jobs]
+        "jobs": [str(job) for job in jobs],
     }
 
 
 @app.post("/scheduler/check-now")
 def check_now():
-    """Run price check immediately (for testing)"""
     check_portfolio_prices()
     return {"message": "Price check completed"}
 
 
 @app.post("/nifty/screen")
 def screen_nifty(input_data: NiftyScreenerInput):
-    """Screen Nifty stocks (async)."""
+    index_name = normalize_symbol(input_data.index)
+
     def run_screener():
         try:
-            nifty_screener_running[input_data.index] = True
+            nifty_screener_running[index_name] = True
             result = screen_nifty_stocks(
-                index=input_data.index,
+                index=index_name,
                 months_3_decline=input_data.months_3_decline,
                 months_6_decline=input_data.months_6_decline,
-                year_1_decline=input_data.year_1_decline
+                year_1_decline=input_data.year_1_decline,
             )
-            nifty_screener_results[input_data.index] = result.model_dump()
-            nifty_screener_running[input_data.index] = False
+            nifty_screener_results[index_name] = result.model_dump()
         except Exception as e:
-            nifty_screener_results[input_data.index] = {"error": str(e)}
-            nifty_screener_running[input_data.index] = False
+            nifty_screener_results[index_name] = {"error": str(e)}
+        finally:
+            nifty_screener_running[index_name] = False
 
-    thread = threading.Thread(target=run_screener)
+    thread = threading.Thread(target=run_screener, daemon=True)
     thread.start()
 
     return {
-        "message": f"Screener started for {input_data.index}",
+        "message": f"Screener started for {index_name}",
         "status": "running",
-        "check_status_at": f"/nifty/screen/status/{input_data.index}"
+        "check_status_at": f"/nifty/screen/status/{index_name}",
     }
 
 
 @app.get("/nifty/screen/status/{index}")
 def get_screener_status(index: str):
-    """Get screener results."""
-    if index not in ["NIFTY50", "NIFTY100"]:
+    index_name = normalize_symbol(index)
+
+    if index_name not in ["NIFTY50", "NIFTY100"]:
         raise HTTPException(status_code=400, detail="Index must be NIFTY50 or NIFTY100")
 
-    if index in nifty_screener_running and nifty_screener_running[index]:
+    if nifty_screener_running.get(index_name):
         return {"status": "running", "message": "Screener is still processing..."}
 
-    if index in nifty_screener_results:
-        return {"status": "completed", **nifty_screener_results[index]}
+    if index_name in nifty_screener_results:
+        return {"status": "completed", **nifty_screener_results[index_name]}
 
     return {"status": "not_started", "message": "No screener run yet. Use POST /nifty/screen to start."}
 
 
 @app.get("/nifty/screen/{index}")
-def screen_nifty_quick(index: str, 
-                       months_3_decline: float = None,
-                       months_6_decline: float = None,
-                       year_1_decline: float = None):
-    """Quick screen Nifty stocks (async)."""
-    if index not in ["NIFTY50", "NIFTY100"]:
+def screen_nifty_quick(
+    index: str,
+    months_3_decline: Optional[float] = None,
+    months_6_decline: Optional[float] = None,
+    year_1_decline: Optional[float] = None,
+):
+    index_name = normalize_symbol(index)
+    if index_name not in ["NIFTY50", "NIFTY100"]:
         raise HTTPException(status_code=400, detail="Index must be NIFTY50 or NIFTY100")
 
-    # Handle NaN or None values
-    m3 = months_3_decline if months_3_decline and months_3_decline == months_3_decline else NIFTY_3M_DECLINE_THRESHOLD
-    m6 = months_6_decline if months_6_decline and months_6_decline == months_6_decline else NIFTY_6M_DECLINE_THRESHOLD
-    y1 = year_1_decline if year_1_decline and year_1_decline == year_1_decline else NIFTY_1Y_DECLINE_THRESHOLD
+    m3 = months_3_decline if months_3_decline is not None else NIFTY_3M_DECLINE_THRESHOLD
+    m6 = months_6_decline if months_6_decline is not None else NIFTY_6M_DECLINE_THRESHOLD
+    y1 = year_1_decline if year_1_decline is not None else NIFTY_1Y_DECLINE_THRESHOLD
 
     def run_screener():
         try:
-            nifty_screener_running[index] = True
+            nifty_screener_running[index_name] = True
             result = screen_nifty_stocks(
-                index=index,
+                index=index_name,
                 months_3_decline=m3,
                 months_6_decline=m6,
-                year_1_decline=y1
+                year_1_decline=y1,
             )
-            nifty_screener_results[index] = result.model_dump()
-            nifty_screener_running[index] = False
+            nifty_screener_results[index_name] = result.model_dump()
         except Exception as e:
-            nifty_screener_results[index] = {"error": str(e)}
-            nifty_screener_running[index] = False
+            nifty_screener_results[index_name] = {"error": str(e)}
+        finally:
+            nifty_screener_running[index_name] = False
 
-    thread = threading.Thread(target=run_screener)
+    thread = threading.Thread(target=run_screener, daemon=True)
     thread.start()
 
     return {
-        "message": f"Screener started for {index}",
+        "message": f"Screener started for {index_name}",
         "status": "running",
         "thresholds": {
             "3_month": m3,
             "6_month": m6,
-            "1_year": y1
+            "1_year": y1,
         },
-        "check_status_at": f"/nifty/screen/status/{index}"
+        "check_status_at": f"/nifty/screen/status/{index_name}",
     }
 
 
 @app.post("/nifty/alert/enable")
 def enable_nifty_alerts(input_data: NiftyScreenerInput):
-    """Enable Nifty screener alerts."""
-    global scheduler
     global NIFTY_3M_DECLINE_THRESHOLD, NIFTY_6M_DECLINE_THRESHOLD, NIFTY_1Y_DECLINE_THRESHOLD
-    
+
     NIFTY_3M_DECLINE_THRESHOLD = input_data.months_3_decline
     NIFTY_6M_DECLINE_THRESHOLD = input_data.months_6_decline
     NIFTY_1Y_DECLINE_THRESHOLD = input_data.year_1_decline
 
     scheduler.add_job(
-        lambda: check_nifty_opportunities(input_data.index),
-        'interval',
+        lambda: check_nifty_opportunities(normalize_symbol(input_data.index)),
+        "interval",
         minutes=60,
-        id='nifty_screener',
-        replace_existing=True
+        id="nifty_screener",
+        replace_existing=True,
     )
 
     return {
-        "message": f"Nifty {input_data.index} screener alerts enabled",
+        "message": f"Nifty {normalize_symbol(input_data.index)} screener alerts enabled",
         "status": "running",
         "thresholds": {
             "3_month": input_data.months_3_decline,
             "6_month": input_data.months_6_decline,
-            "1_year": input_data.year_1_decline
-        }
+            "1_year": input_data.year_1_decline,
+        },
     }
 
 
 @app.post("/nifty/alert/disable")
 def disable_nifty_alerts():
-    """Disable Nifty screener alerts."""
-    global scheduler
     try:
-        scheduler.remove_job('nifty_screener')
+        scheduler.remove_job("nifty_screener")
         return {"message": "Nifty screener alerts disabled", "status": "stopped"}
     except Exception:
         return {"message": "Nifty screener was not running", "status": "stopped"}
@@ -1040,7 +994,7 @@ def disable_nifty_alerts():
 def root():
     return {
         "message": "Stock Dashboard API (PostgreSQL)",
-        "database": "Connected to Aiven PostgreSQL",
+        "database": "Configured",
         "endpoints": {
             "POST /stocks": "Add a stock to portfolio",
             "DELETE /stocks/{symbol}": "Remove a stock",
@@ -1055,8 +1009,8 @@ def root():
             "POST /scheduler/start": "Start price checker",
             "POST /scheduler/stop": "Stop price checker",
             "GET /scheduler/status": "Check status",
-            "POST /scheduler/check-now": "Run check now"
-        }
+            "POST /scheduler/check-now": "Run check now",
+        },
     }
 
 
