@@ -34,7 +34,7 @@ app.add_middleware(
 # Database configuration
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+psucharanteja8143-fa28.g.aivencloud.com:26779/stockscreener?sslmode=require"
+    "postgresql+psucharanteja814r?sslmode=require"
 )
 
 if DATABASE_URL.startswith("postgres://"):
